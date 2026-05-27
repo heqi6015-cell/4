@@ -10,14 +10,12 @@ export default async function handler(req, res) {
             headers: {
                 'Content-Type': 'application/json',
                 'x-api-key': process.env.ANTHROPIC_API_KEY,
-               'anthropic-version': '2023-06-01',
-'anthropic-beta': 'thinking-2024-10-22'
+                'anthropic-version': '2023-06-01'
             },
             body: JSON.stringify(req.body)
         });
 
         const data = await response.json();
-
         res.status(response.status).json(data);
 
     } catch (error) {
