@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Claude Chat</title>
+<style>
+*{ margin:0; padding:0; box-sizing:border-box; }
+body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#f5f5f5; height:100vh; display:flex; flex-direction:column; }
+#header{ background:white; padding:15px; border-bottom:1px solid #ddd; }
+#tabs{ display:flex; gap:8px; overflow-x:auto; margin-bottom:10px; padding-bottom:8px; }
+.tab{ padding:8px 16px; background:#f0f0f0; border-radius:8px; cursor:pointer; white-space:nowrap; font-size:14px; display:flex; align-items:center; gap:8px; }
+.tab.active{ background:#007AFF; color:white; }
+.tab-close{ font-weight:bold; cursor:pointer; }
+#controls{ display:flex; gap:8px; flex-wrap:wrap; }
+#controls button{ padding:6px 12px; border:none; border-radius:6px; font-size:14px; cursor:pointer; }
+#new-chat-btn{ background:#34c759; color:white; }
+#clear-btn{ background:#ff3b30; color:white; }
+#memory-btn{ background:#007AFF; color:white; }
+#summary-btn{ background:#5856d6; color:white; }
+#thinking-btn{ background:#f0f0f0; color:#333; border:1px solid #ccc; }
+#thinking-btn.active{ background:#ff9500; color:white; border-color:#ff9500; }
+#chat-container{ flex:1; overflow-y:auto; padding:20px; display:flex; flex-direction:column; gap:15px; }
+.message{ max-width:80%; padding:12px 16px; border-radius:18px; word-wrap:break-word; white-space:pre-wrap; line-height:1.5; }
+.user{ align-self:flex-end; background:#007AFF; color:white; }
+.assistant{ align-self:flex-start; background:white; color:black; box-shadow:0 1px 2px rgba(0,0,0,0.1); }
+.loading{ color:#999; font-style:italic; }
+.empty-state{ text-align:center; color:#999; margin-top:50px; }
+.thinking-block{ align-self:flex-start; max-width:80%; border:1px solid #ffd6a0; border-radius:12px; overflow:hidden; background:#fffaf3; }
+.thinking-header{ padding:8px 14px; cursor:pointer; display:flex; align-items:center; gap:8px; font-size:13px; color:#b8700a; user-select:none; }
+.thinking-header:hover{ background:#fff0d9; }
+.thinking-arrow{ font-size:10px; transition:transform 0.2s; }
+.thinking-arrow.open{ transform:rotate(90deg); }
+.thinking-body{ display:none; padding:10px 14px; font-size:13px; color:#666; white-space:pre-wrap; border-top:1px solid #ffd6a0; max-height:300px; overflow-y:auto; line-height:1.5; }
+.thinking-body.open{ display:block; }
+.summary-notice{ align-self:center; font-size:12px; color:#aaa; background:#efefef; padding:4px 14px; border-radius:10px; }
+#token-bar{ background:white; border-top:1px solid #eee; padding:8px 15px; font-size:13px; color:#666; display:flex; justify-content:space-between; }
+#input-area{ padding:15px; background:white; border-top:1px solid #ddd; display:flex; gap:10px; }
+#user-input{ flex:1; padding:10px 15px; border:1px solid #ddd; border-radius:20px; font-size:16px; outline:none; }
+#send-btn{ padding:10px 20px; background:#007AFF; color:white; border:none; border-radius:20px; cursor:pointer; }
+#send-btn:disabled{ background:#ccc; }
+#memory-modal{ display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:999; justify-content:center; align-items:center; }
+#memory-modal.show{ display:flex; }
+.modal-content{ background:white; width:90%; max-width:700px; max-height:80%; overflow-y:auto; border-radius:12px; padding:20px; }
+.modal-content textarea{ width:100%; min-height:250px; padding:10px; margin-top:15px; border:1px solid #ddd; border-radius:8px; resize:vertical; font-size:14px; }
+.modal-buttons{ margin-top:15px; display:flex; justify-content:flex-end; gap:10px; }
+.modal-buttons button{ padding:8px 16px; border:none; border-radius:6px; cursor:pointer; }
+</style>
+</head>
+<body>
+
+<div id="header">
+    <div id="tabs"></div>
+    <div id="controls">
+        <button id="new-chat-btn">新对话</button>
+        <button id="memory-btn">长期记忆</button>
+        <button id="summary-btn">总结进记忆</button>
+        <button id="thinking-btn">思考链 关</button>
+        <button id="clear-btn">清空当前</button>
+    </div>
+</div>
+
+<div id="chat-container"></div>
+
+<div id="token-bar">
+    <span id="token-info">Tokens: 0</span>
+    <span id="cost-info">Cost: $0</span>
+</div>
+
+<div id="input-area">
+    <input type="text" id="user-input" placeholder="输入消息..." />
+    <button id="send-btn">发送</button>
+</div>
+
+<div id="memory-modal">
+    <div class="modal-content">
+        <h2>长期记忆</h2>
+        <p style="margin-top:10px;color:#666;">新聊天也会自动携带这些信息</p>
+        <textarea id="memory-text"></textarea>
+        <div class="modal-buttons">
+            <button onclick="closeMemoryModal()">取消</button>
+            <button onclick="saveMemory()" style="background:#007AFF;color:white;">保存</button>
+        </div>
+    </div>
+</div>
+
+<script>
+
+const SUMMARY_THRESHOLD = 40;
+const KEEP_RECENT = 20;
+
+const chatContainer = document.getElementById('chat-container');
+const userInput = document.getElementById('user-input');
+const sendBtn = document.getElementById('send-btn');
+const thinkingBtn = document.getElementById('thinking-btn');
+const tabsContainer = document.getElementById('tabs');
+
+let chats = [];
+let currentChatId = null;
+let globalMemory = '';
+let thinkingEnabled = false;
+
+function init(){
+    loadMemory();
+    loadChats();
+    if(chats.length === 0) createNewChat();
+    else switchToChat(chats[0].id);
+}
+
+function loadMemory(){
+    globalMemory = localStorage.getItem('claude-global-memory') || '';
+}
+
+function saveMemory(){
+    globalMemory = document.getElementById('memory-text').value;
+    localStorage.setItem('claude-global-memory', globalMemory);
+    closeMemoryModal();
+}
+
+function openMemoryModal(){
+    document.getElementById('memory-text').value = globalMemory;
+    document.getElementById('memory-modal').classList.add('show');
+}
+
+function closeMemoryModal(){
+    document.getElementById('memory-modal').classList.remove('show');
+}
+
+function toggleThinking(){
+    thinkingEnabled = !thinkingEnabled;
+    thinkingBtn.textContent = '思考链 ' + (thinkingEnabled ? '开' : '关');
+    thinkingBtn.classList.toggle('active', thinkingEnabled);
+}
+
+function loadChats(){
+    const saved = localStorage.getItem('claude-chats');
+    if(saved) chats = JSON.parse(saved);
+}
+
+function saveChats(){
+    localStorage.setItem('claude-chats', JSON.stringify(chats));
+}
+
+function createNewChat(){
+    const newChat = {
+        id: Date.now(),
+        title: '对话 ' + (chats.length + 1),
+        history: [],
+        summary: '',
+        usage: { input:0, output:0 }
+    };
+    chats.unshift(newChat);
+    saveChats();
+    renderTabs();
+    switchToChat(newChat.id);
+}
+
+function renderTabs(){
+    tabsContainer.innerHTML = '';
+    chats.forEach(function(chat){
+        const tab = document.createElement('div');
+        tab.className = 'tab' + (chat.id === currentChatId ? ' active' : '');
+
+        const titleSpan = document.createElement('span');
+        titleSpan.textContent = chat.title;
+        titleSpan.onclick = function(){ switchToChat(chat.id); };
+        tab.appendChild(titleSpan);
+
+        if(chats.length > 1){
+            const closeSpan = document.createElement('span');
+            closeSpan.className = 'tab-close';
+            closeSpan.textContent = 'x';
+            closeSpan.onclick = function(e){ closeChat(e, chat.id); };
+            tab.appendChild(closeSpan);
+        }
+
+        tabsContainer.appendChild(tab);
+    });
+}
+
+function switchToChat(chatId){
+    currentChatId = chatId;
+    renderTabs();
+    renderMessages();
+    updateUsageDisplay();
+}
+
+function closeChat(event, chatId){
+    event.stopPropagation();
+    chats = chats.filter(function(c){ return c.id !== chatId; });
+    saveChats();
+    if(currentChatId === chatId) switchToChat(chats[0].id);
+    else renderTabs();
+}
+
+function getCurrentChat(){
+    return chats.find(function(c){ return c.id === currentChatId; });
+}
+
+function clearCurrentChat(){
+    if(!confirm('确定清空当前对话？')) return;
+    const chat = getCurrentChat();
+    chat.history = [];
+    chat.summary = '';
+    chat.usage = { input:0, output:0 };
+    saveChats();
+    renderMessages();
+    updateUsageDisplay();
+}
+
+function renderMessages(){
+    chatContainer.innerHTML = '';
+    const chat = getCurrentChat();
+
+    if(chat.summary){
+        const notice = document.createElement('div');
+        notice.className = 'summary-notice';
+        notice.textContent = '── 早期对话已自动压缩 ──';
+        chatContainer.appendChild(notice);
+    }
+
+    if(chat.history.length === 0 && !chat.summary){
+        const empty = document.createElement('div');
+        empty.className = 'empty-state';
+        empty.textContent = '开始新的对话吧';
+        chatContainer.appendChild(empty);
+        return;
+    }
+
+    chat.history.forEach(function(msg){
+        addMessage(msg.role, msg.content[0].text, false);
+    });
+
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+function addMessage(role, content, shouldSave){
+    if(shouldSave === undefined) shouldSave = true;
+    const empty = chatContainer.querySelector('.empty-state');
+    if(empty) empty.remove();
+
+    const div = document.createElement('div');
+    div.className = 'message ' + role;
+    div.textContent = content;
+    chatContainer.appendChild(div);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+
+    if(shouldSave){
+        const chat = getCurrentChat();
+        chat.history.push({
+            role: role,
+            content: [{ type:'text', text:content }]
+        });
+        saveChats();
+    }
+}
+
+function addThinkingBlock(thinkingText){
+    const block = document.createElement('div');
+    block.className = 'thinking-block';
+
+    const header = document.createElement('div');
+    header.className = 'thinking-header';
+
+    const arrow = document.createElement('span');
+    arrow.className = 'thinking-arrow';
+    arrow.textContent = '▶';
+
+    const label = document.createElement('span');
+    label.textContent = '思考过程';
+
+    header.appendChild(arrow);
+    header.appendChild(label);
+
+    const body = document.createElement('div');
+    body.className = 'thinking-body';
+    body.textContent = thinkingText;
+
+    header.onclick = function(){
+        arrow.classList.toggle('open');
+        body.classList.toggle('open');
+    };
+
+    block.appendChild(header);
+    block.appendChild(body);
+    chatContainer.appendChild(block);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+function showLoading(){
+    const div = document.createElement('div');
+    div.id = 'loading';
+    div.className = 'loading';
+    div.textContent = thinkingEnabled ? 'Claude 正在思考...' : 'Claude 正在回复...';
+    chatContainer.appendChild(div);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+function removeLoading(){
+    const loading = document.getElementById('loading');
+    if(loading) loading.remove();
+}
+
+function updateUsageDisplay(){
+    const chat = getCurrentChat();
+    const input = (chat.usage && chat.usage.input) ? chat.usage.input : 0;
+    const output = (chat.usage && chat.usage.output) ? chat.usage.output : 0;
+    document.getElementById('token-info').textContent =
+        'Input: ' + input + ' | Output: ' + output + ' | Total: ' + (input + output);
+    const cost = (input / 1000000 * 3) + (output / 1000000 * 15);
+    document.getElementById('cost-info').textContent = 'Cost: $' + cost.toFixed(4);
+}
+
+async function autoCompressIfNeeded(chat){
+    if(chat.history.length <= SUMMARY_THRESHOLD) return;
+
+    const toCompress = chat.history.slice(0, chat.history.length - KEEP_RECENT);
+    chat.history = chat.history.slice(chat.history.length - KEEP_RECENT);
+
+    try{
+        const res = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: 'claude-sonnet-4-5-20250929',
+                max_tokens: 1000,
+                messages: toCompress.concat([{
+                    role: 'user',
+                    content: [{ type:'text', text:'请将以上对话总结成简洁摘要，保留关键信息和上下文，以便后续对话能理解背景。' }]
+                }])
+            })
+        });
+        const data = await res.json();
+        if(data.content && data.content[0] && data.content[0].text){
+            const newSummary = data.content[0].text;
+            chat.summary = chat.summary ? chat.summary + '\n\n' + newSummary : newSummary;
+        }
+    }catch(e){
+        console.error('自动压缩失败:', e);
+    }
+
+    saveChats();
+
+    const notice = document.createElement('div');
+    notice.className = 'summary-notice';
+    notice.textContent = '── 早期对话已自动压缩 ──';
+    if(chatContainer.firstChild){
+        chatContainer.insertBefore(notice, chatContainer.firstChild);
+    }else{
+        chatContainer.appendChild(notice);
+    }
+}
+
+async function sendMessage(){
+    const message = userInput.value.trim();
+    if(!message) return;
+
+    addMessage('user', message);
+    userInput.value = '';
+    sendBtn.disabled = true;
+    showLoading();
+
+    const chat = getCurrentChat();
+
+    await autoCompressIfNeeded(chat);
+
+    try{
+        let systemParts = [];
+        if(globalMemory.trim()){
+            systemParts.push('你对用户的长期记忆：\n\n' + globalMemory + '\n\n请自然使用这些信息，不要每次重复。');
+        }
+        if(chat.summary){
+            systemParts.push('以下是当前对话早期部分的摘要：\n\n' + chat.summary);
+        }
+
+        const requestBody = {
+            model: 'claude-sonnet-4-5-20250929',
+            max_tokens: thinkingEnabled ? 16000 : 4096,
+            messages: chat.history
+        };
+
+        if(systemParts.length > 0){
+            requestBody.system = systemParts.join('\n\n---\n\n');
+        }
+
+        if(thinkingEnabled){
+            requestBody.thinking = { type:'enabled', budget_tokens:10000 };
+        }
+
+        const response = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestBody)
+        });
+
+        const text = await response.text();
+        console.log(text);
+        const data = JSON.parse(text);
+
+        removeLoading();
+
+        if(data.content && data.content.length > 0){
+            let thinkingText = '';
+            let replyText = '';
+
+            data.content.forEach(function(block){
+                if(block.type === 'thinking' && block.thinking) thinkingText = block.thinking;
+                if(block.type === 'text' && block.text) replyText = block.text;
+            });
+
+            if(thinkingText) addThinkingBlock(thinkingText);
+
+            if(replyText){
+                const empty = chatContainer.querySelector('.empty-state');
+                if(empty) empty.remove();
+
+                const div = document.createElement('div');
+                div.className = 'message assistant';
+                div.textContent = replyText;
+                chatContainer.appendChild(div);
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+
+                chat.history.push({
+                    role: 'assistant',
+                    content: [{ type:'text', text:replyText }]
+                });
+            }
+
+            if(data.usage){
+                chat.usage.input += data.usage.input_tokens || 0;
+                chat.usage.output += data.usage.output_tokens || 0;
+            }
+
+            saveChats();
+            updateUsageDisplay();
+
+        }else{
+            addMessage('assistant', '错误：' + JSON.stringify(data));
+        }
+
+    }catch(error){
+        removeLoading();
+        addMessage('assistant', '连接失败：' + error.message);
+    }
+
+    sendBtn.disabled = false;
+    userInput.focus();
+}
+
+async function summarizeToMemory(){
+    const chat = getCurrentChat();
+    if(chat.history.length === 0) return;
+
+    const summaryPrompt = '请总结这段对话里：\n- 用户长期稳定的偏好\n- 人设\n- 关系\n- 世界观\n- 长期目标\n- 重要设定\n\n只保留未来聊天仍然有价值的信息。不要总结临时闲聊。';
+
+    try{
+        const response = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: 'claude-sonnet-4-5-20250929',
+                max_tokens: 2000,
+                messages: chat.history.concat([{
+                    role: 'user',
+                    content: [{ type:'text', text:summaryPrompt }]
+                }])
+            })
+        });
+
+        const data = await response.json();
+
+        if(data.content && data.content[0]){
+            globalMemory += '\n\n' + data.content[0].text;
+            localStorage.setItem('claude-global-memory', globalMemory);
+            alert('已写入长期记忆');
+        }
+
+    }catch(error){
+        alert('总结失败：' + error.message);
+    }
+}
+
+document.getElementById('send-btn').addEventListener('click', sendMessage);
+document.getElementById('new-chat-btn').addEventListener('click', createNewChat);
+document.getElementById('clear-btn').addEventListener('click', clearCurrentChat);
+document.getElementById('memory-btn').addEventListener('click', openMemoryModal);
+document.getElementById('summary-btn').addEventListener('click', summarizeToMemory);
+thinkingBtn.addEventListener('click', toggleThinking);
+
+userInput.addEventListener('keypress', function(e){
+    if(e.key === 'Enter') sendMessage();
+});
+
+init();
+
+</script>
+</body>
+</html>
